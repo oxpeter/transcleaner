@@ -12,6 +12,8 @@ import re
 import tempfile
 
 import matplotlib.pyplot as plt
+import networkx
+from networkx.algorithms.components.connected import connected_components
 
 from ortholotree import config
 from orthomods import internal
@@ -167,68 +169,10 @@ def define_arguments():
 
     return parser
 
-def parse_transcript(defline, blast_idx=None):
-    """
-    assumes a Trinity-styled + TransDecoder transcript ID,
-    and extracts the gene and isoform id tags, plus positional information.
-    """
-    # get columns with relevant information:
-    cols = defline.split()
-    base = cols[0]
-    posn = cols[-1]
-
-    # search for Trinity gene and isoform ID:
-    base_s = re.search( '>(\w+)\|?', base)
-
-    # get TransDecoder peptide positions from Trinity transcript:
-    tdpos_s = re.search( ':(\d+)-(\d+)', posn)
-
-    # get TransDecoder gene id and blast result:
-    tdgid = base[1:]
-    if blast_idx and tdgid in blast_idx:
-        blast = blast_idx[tdgid]
-    else:
-        blast = None
-
-    if base_s and tdpos_s:
-        # gene and isoform
-        el = base_s.group(1).split('_')
-        gene = "_".join(el[:-1])
-        isoform = base
-
-        # TD positions
-        start = int(tdpos_s.group(1))
-        end   = int(tdpos_s.group(2))
-
-        return gene, isoform, start, end, blast
-
-    else:
-        return None, None, None, None, None
-
-def get_blast_idx(blastfile, level='transdecoder'):
-    taxalist = bb.get_taxa_groups(ants=True)
-    blast_out = {}
-    handle = open(args.blast, 'rb')
-    for line in handle:
-        if level == 'gene':
-            trinity = "_".join(line.split()[0].split("|")[0].split("_")[:-1])
-        elif level == 'transdecoder':
-            trinity = line.split()[0]
-        else:
-            trinity = line.split()[0].split("|")[0]
-        species, blast = bb.parse_gene(line, taxalist)
-        if trinity in blast_out:
-            blast_out[trinity].append(blast)
-        else:
-            blast_out[trinity] = [blast]
-
-    return blast_out
-
 def parse_defline(line):
     tdid = line.split()[0][1:]
     trinityid = tdid.split("|")[0]
     return tdid, trinityid
-
 
 def get_full_blast_idx(blastfile):
     idx = {}
@@ -280,6 +224,33 @@ def progress(counter, total, t0):
 
     return counter
 
+def to_graph(l):
+    """
+    This solution was modified from a stack overflow answer:
+    http://stackoverflow.com/questions/4842613/merge-lists-that-share-common-elements
+    """
+    G = networkx.Graph()
+    for gf in l:
+        # each sublist is a bunch of nodes
+        G.add_nodes_from(gf.geneids.keys())
+        # it also imlies a number of edges:
+        G.add_edges_from(to_edges(gf.geneids.keys()))
+    return G
+
+def to_edges(l):
+    """
+        treat `l` as a Graph and returns it's edges
+        to_edges(['a','b','c','d']) -> [(a,b), (b,c),(c,d)]
+    """
+    it = iter(l)
+    last = next(it)
+
+    for current in it:
+        yield last, current
+        last = current
+
+
+
 if __name__ == '__main__':
     dbpaths = config.import_paths()
 
@@ -293,22 +264,12 @@ if __name__ == '__main__':
     os.rmdir(temp_dir)  # dir must be empty!
 
     # collate genes with identical sequences:
-    seqdic_isoform = {}###
-    seqdic_gene = {}###
-    seqdic_plain = {}###
-    gene_isoforms = {}###
-    all_genes = {}###
-    blast_genes = {}###
-    blast_results = {}###
-
     transcript_dic = {}
     gene_families = {}
     seq_families = {}
     geneid_idx = {}
     gf_idx = {}
 
-    blast_idx = get_blast_idx(args.blast, level='transdecoder')
-    verbalise("Y", "Created blast index with %d entries" % (len(blast_idx)))
 
     full_blast = get_full_blast_idx(args.blast)
     verbalise("Y", "Created full blast index with %d entries" % (len(full_blast)))
@@ -341,6 +302,7 @@ if __name__ == '__main__':
         else:
             geneid_idx[newtranscript.geneid] = [newtranscript]
 
+    verbalise("Y", "%d trinity gene ids\n\n" % (len(geneid_idx)))
 
     # assemble gene_families starting with sequence similarity
     for ts in seq_families.values():
@@ -355,10 +317,27 @@ if __name__ == '__main__':
                 gf_idx[t] = [newfamily]
 
     report(gene_families, 5, verbalise=verbalise)
-    verbalise("Y", "%d trinity gene ids found" % (len(geneid_idx)))
 
 
+    # merge solution from SO:
+    G = to_graph(gene_families)
 
+    # collect new gene families:
+    trinity_pool = {}
+    count = 0
+
+    for group in connected_components(G):
+        count += 1
+        ts = []
+        for gid in group:
+            ts += geneid_idx[gid]
+        newgf = Gene_family(ts)
+        trinity_pool[newgf] = True
+
+    print count, "\n\nmerged families from networkx"
+    report(trinity_pool, 5, verbalise=verbalise)
+
+    """
     # merge families based on trinity gene name:
     trinity_pool = {} # index on members to removed duplicate genefamilies
     verbalise("B", "\nMerging datasets")
@@ -376,20 +355,26 @@ if __name__ == '__main__':
                             else:
                                 gf.merge(mgf)
 
+
         trinity_pool[tuple(gf.members)] = gf
         counter = progress(counter, total, t0)
 
+    print ""
     trinity_dic = { v:True for v in trinity_pool.values()  }
 
     report(trinity_dic, 5, verbalise=verbalise)
+    """
 
     # write gene families to file:
     outhandle = open(logfile[:-3] + "families.out", 'w')
-    report(trinity_dic, None, outhandle)
+    report(trinity_pool, None, outhandle)
     outhandle.close()
 
-    plt.hist([len(gf) for gf in trinity_dic], bins=range(12))
+    plt.hist([len(gf) for gf in trinity_pool], bins=range(12))
     plt.title("Number of genes in each gene family")
+    plt.ylabel("Number of families")
+    plt.xlabel("Number of trinity genes")
+    plt.savefig(logfile[:-3] + "family_size.pdf", format='pdf')
     plt.show()
 
 
