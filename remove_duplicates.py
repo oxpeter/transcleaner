@@ -6,6 +6,7 @@ detail the phylogenetic relationships between all closely related proteins.
 """
 
 import argparse
+import datetime
 import os
 import re
 import tempfile
@@ -47,10 +48,28 @@ class Transcript(object):
         self.iso_id          = trinity_id
 
     def __str__(self):
-        if self.start and self.end:
-            return "%s [%s-%s]" % (self.td_id, self.start, self.end)
+        if self.seq:
+            s1 = "...".join([self.seq[:5], self.seq[-5:]])
         else:
-            return "%s" % (self.td_id)
+            s1 = "---"
+
+        if self.blast:
+            b1 = self.blast
+        else:
+            b1 = "---"
+
+        if self.start and self.end:
+            pos = "%s-%s" % (self.start, self.end)
+        else:
+            pos = ""
+
+        if self.bstart and self.bend:
+            bpos = "%s-%s" % (self.bstart, self.bend)
+        else:
+            bpos = ""
+
+        return "%s [%s %s %s] (%s)" % (self.td_id, pos, b1, bpos, s1 )
+
 
     def __repr__(self):
         return "%r %r %r %r %r" % (self.trinity_id,
@@ -59,6 +78,11 @@ class Transcript(object):
                                     self.start,
                                     self.end)
 
+    def __len__(self):
+        if self.seq:
+            return len(self.seq)
+        else:
+            return 0
 
 class Gene_family(object):
     """
@@ -76,9 +100,32 @@ class Gene_family(object):
     def __str__(self):
         return "%d members (%d w blast)" % (len(self.members), len(self.blast_hits))
 
+    def __repr__(self):
+        return "%r" % (self.members)
+
+    def __len__(self):
+        return len(self.members)
+
+    def __contains__(self, item):
+        if item in self.members:
+            return True
+        else:
+            return False
+
+    def __iter__(self):
+        for t in self.members:
+            yield t
+
+    def __comp__(self, other):
+        if self.members == other.members:
+            return True
+        else:
+            return False
+
     def add_transcript(self, transcript):
         self.members[transcript] = True
         self.memberid[transcript.trinity_id] = True
+        self.geneids[transcript.geneid] = True
         if transcript.blast:
             self.blast_hits[transcript.blast] = True
         if transcript.seq:
@@ -87,7 +134,7 @@ class Gene_family(object):
     def merge(self, gf):
         for t in gf.members:
             self.add_transcript(t)
-        del gf
+
 
 
 
@@ -191,6 +238,47 @@ def get_full_blast_idx(blastfile):
 
     return idx
 
+def report(gene_families, num=5, handle=None, verbalise=lambda *x:None):
+
+    verbalise("G", "%d transcripts in %d gene families" % (sum(len(gf) for gf in gene_families),
+                                                len(gene_families) ))
+    verbalise("Y",
+        "%d gene families with >1 member" % (sum(1 for gf in gene_families if len(gf) > 1)))
+    verbalise("Y",
+        "%d gene families with >1 blast result" % (sum(1 for gf in gene_families if len(gf.blast_hits) > 1)))
+
+    print ""
+
+    # sanity check output:
+    for gf in gene_families.keys()[:num]:
+        if handle:
+            handle.write("%s\n" % gf)
+        verbalise("M", gf)
+        for t in gf:
+            if handle:
+                handle.write("%s\n" % t)
+            verbalise("B", t)
+
+def progress(counter, total, t0):
+    counter += 1
+    if counter % int(1.0 * total / 10000) == 0:
+        t1 = datetime.datetime.now()
+        diff = t1-t0
+        if diff.seconds < 2:
+            left = 9999999999
+        else:
+            rate = 1.0 *  diff.seconds / counter
+            left =  (total * rate) - diff.seconds
+
+        try:
+            remaining = datetime.timedelta(seconds=left)
+        except OverflowError:
+            remaining = datetime.timedelta(days=999999999)
+
+        print '\r%d of %d complete (%.2f%%) Time remaining: %s       \r' % (counter,
+                total, 100.0*counter/total, remaining),
+
+    return counter
 
 if __name__ == '__main__':
     dbpaths = config.import_paths()
@@ -211,8 +299,13 @@ if __name__ == '__main__':
     gene_isoforms = {}###
     all_genes = {}###
     blast_genes = {}###
-    blast_results = {}##3
+    blast_results = {}###
+
     transcript_dic = {}
+    gene_families = {}
+    seq_families = {}
+    geneid_idx = {}
+    gf_idx = {}
 
     blast_idx = get_blast_idx(args.blast, level='transdecoder')
     verbalise("Y", "Created blast index with %d entries" % (len(blast_idx)))
@@ -221,73 +314,82 @@ if __name__ == '__main__':
     verbalise("Y", "Created full blast index with %d entries" % (len(full_blast)))
 
     for defline, seq in internal.parsefasta(args.transdecoder):
-        gene, isoform, start, end, blast = parse_transcript(defline, blast_idx)
-        #newtranscript = Transcript(trinity_id=, transdecoder_id=, blastline=, seq=)
+        # get trinity and transdecoder gene ids:
+        tdid, trinityid = parse_defline(defline)
 
-        if seq in seqdic_gene:
-            seqdic_gene[seq].append((gene, start, end, blast))
-            seqdic_isoform[seq].append(isoform)
-            seqdic_plain[seq].append(gene)
+        # get any blast results:
+        if tdid in full_blast:
+            blastline = full_blast[tdid]
         else:
-            seqdic_gene[seq] = [(gene, start, end, blast),]
-            seqdic_isoform[seq] = [isoform,]
-            seqdic_plain[seq] = [gene,]
+            blastline = None
 
-        if gene in gene_isoforms:
-            gene_isoforms[gene].append(isoform)
-            all_genes[gene].append(seq)
+        # create new transcript instance
+        newtranscript = Transcript(trinity_id=trinityid,
+                                    transdecoder_id=tdid,
+                                    blastline=blastline,
+                                    seq=seq)
+
+        # file based on sequence similarity
+        if seq in seq_families:
+            seq_families[seq].append(newtranscript)
         else:
-            gene_isoforms[gene] = [isoform,]
-            all_genes[gene] = [seq,]
+            seq_families[seq] = [newtranscript]
 
-        if blast and tuple(blast) in blast_results:
-            blast_results[tuple(blast)].append(gene)
-        elif blast:
-            blast_results[tuple(blast)] = [gene]
+        # create index of geneids for faster merging:
+        if newtranscript.geneid in geneid_idx:
+            geneid_idx[newtranscript.geneid].append(newtranscript)
+        else:
+            geneid_idx[newtranscript.geneid] = [newtranscript]
 
-        if blast and (gene,tuple(blast)) in blast_genes:
-            blast_genes[(gene,tuple(blast))].append(seq)
-        elif blast:
-            blast_genes[(gene,tuple(blast))] = [seq,]
 
-    verbalise("G", "%d unique sequences found" % (len(seqdic_gene)))
-    verbalise("G", "%d unique trinity gene ids found" % (len(all_genes)))
-    verbalise("Y",
-        "%d blast results found, %d map to more than 1 gene" % (len(blast_results),
-                                    sum( 1 for i in blast_results.values() if len(i) > 1)))
+    # assemble gene_families starting with sequence similarity
+    for ts in seq_families.values():
+        newfamily = Gene_family(ts)
 
-    #verbalise("B", blast_results.keys())
-    genesets = []
-    unclassified_genes = { k:1 for k in all_genes.keys()[:] }
+        # files for indexing
+        gene_families[newfamily] = True
+        for t in ts:
+            if t in gf_idx:
+                gf_idx[t].append(newfamily)
+            else:
+                gf_idx[t] = [newfamily]
 
-    for gene in all_genes.keys()[:]:
-        newset = [gene]
-        for seq in all_genes[gene]:
-            for g2 in seqdic_plain[seq]:
-                newset.append(g2)
-
-        genesets.append(tuple(set(newset)))
-
-    genesets = list(set(genesets))
-
-    verbalise("M",
-        "%d sets with more than one trinity gene" % (sum([ 1 for gl in seqdic_plain.values() if len(set(gl)) > 1])))
-
-    # report some stats:
-    verbalise("G", "%d gene families created" % (len(genesets)))
-    verbalise("C", "\n".join([ str(g) for g in genesets[:5]]))
-    print ""
+    report(gene_families, 5, verbalise=verbalise)
+    verbalise("Y", "%d trinity gene ids found" % (len(geneid_idx)))
 
 
 
-    plt.hist([len(set(i)) for i in genesets], bins=range(12))
+    # merge families based on trinity gene name:
+    trinity_pool = {} # index on members to removed duplicate genefamilies
+    verbalise("B", "\nMerging datasets")
+    total = len(gene_families)
+    counter = 0
+    t0 = datetime.datetime.now()
+    for gf in gene_families.keys():
+        for gid in gf.geneids.keys():
+            if gid in geneid_idx:
+                for t in geneid_idx[gid]:
+                    if t in gf_idx:
+                        for mgf in gf_idx[t]:
+                            if mgf == gf:
+                                pass
+                            else:
+                                gf.merge(mgf)
+
+        trinity_pool[tuple(gf.members)] = gf
+        counter = progress(counter, total, t0)
+
+    trinity_dic = { v:True for v in trinity_pool.values()  }
+
+    report(trinity_dic, 5, verbalise=verbalise)
+
+    # write gene families to file:
+    outhandle = open(logfile[:-3] + "families.out", 'w')
+    report(trinity_dic, None, outhandle)
+    outhandle.close()
+
+    plt.hist([len(gf) for gf in trinity_dic], bins=range(12))
     plt.title("Number of genes in each gene family")
-    plt.show()
-
-    plt.hist([len(set(i)) for i in seqdic_gene.values()],
-                    bins=range(12), facecolor='b', alpha=0.7)
-    plt.hist([ len(set(i)) for i in seqdic_isoform.values()],
-                    bins=range(12), facecolor='g', alpha=0.7)
     plt.show()
 
 
