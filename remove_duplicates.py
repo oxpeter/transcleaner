@@ -73,7 +73,6 @@ class Transcript(object):
 
         return "%s [%s %s %s] (%s)" % (self.td_id, pos, b1, bpos, s1 )
 
-
     def __repr__(self):
         return "%r %r %r %r %r" % (self.trinity_id,
                                     self.td_id,
@@ -241,8 +240,6 @@ def make_gff(outhandle, gff, gene_families, gf_idx):
         verbalise("R", "\n".join(str(k)+" "+str(v) for k,v in no_family.items()[:5]))
     if len(no_transcript)>0:
         verbalise("M", "%d transcripts from gff not matched by regex profile" % len(no_transcript))
-
-
 
 def progress(counter, total, t0):
     counter += 1
@@ -432,9 +429,28 @@ if __name__ == '__main__':
     #############################################################################
     # get longest peptide for each gene (not necessarily the longest transcript)
     if args.longest:
+        longest_transcripts = {}
+        for gf in trinity_pool:
+            longest_l = 0
+            longest_t = None
+            for t in gf:
+                if len(t) >= longest:
+                    longest_l = len(t)
+                    longest_t = t
+            else:
+                longest_transcripts[gf.id] = longest_t
+                
+        outhandle = open(logfile[:-3] + "longest_transcript.gtf", 'w')
+        make_gff(outhandle, args.gff, trinity_pool, gf_idx)
+        outhandle.close()    
 
-
-
+        outhandle = open(logfile[:-3] + "longest_transcript.pep", 'w')
+        for gf, lt in longest_transcripts.items():
+            fastastring = ">SGF%s %s\n%s\n" % (gf.id, lt.td_id, lt.seq )
+            outhandle.write(fastastring)
+        outhandle.close()
+            
+            
 
 
 
