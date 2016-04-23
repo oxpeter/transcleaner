@@ -434,11 +434,11 @@ if __name__ == '__main__':
             longest_l = 0
             longest_t = None
             for t in gf:
-                if len(t) >= longest:
+                if len(t) >= longest_l:
                     longest_l = len(t)
                     longest_t = t
             else:
-                longest_transcripts[gf.id] = longest_t
+                longest_transcripts[gf] = longest_t
                 
         outhandle = open(logfile[:-3] + "longest_transcript.gtf", 'w')
         make_gff(outhandle, args.gff, trinity_pool, gf_idx)
@@ -446,12 +446,24 @@ if __name__ == '__main__':
 
         outhandle = open(logfile[:-3] + "longest_transcript.pep", 'w')
         for gf, lt in longest_transcripts.items():
-            fastastring = ">SGF%s %s\n%s\n" % (gf.id, lt.td_id, lt.seq )
+            fastastring = ">SGF%d %s\n%s\n" % (gf.id, lt.td_id, lt.seq )
             outhandle.write(fastastring)
         outhandle.close()
             
             
+        longest_dist =    [len(t) for t in longest_transcripts.values()]         
+        verbalise("G", 
+        "%d longest transcripts found and written to file." % (len(longest_transcripts)))            
+        verbalise("G", 
+            "Mean length: %.1f aa" % ( 1.0 * sum(longest_dist)/len(longest_dist)))
+    
+        if args.display_on:
+            plt.hist(longest_dist, bins=50)
+            plt.title("Distribution of peptide lengths")
+            plt.ylabel("Number of transcripts")
+            plt.xlabel("Size of transcript (aa)")
+            plt.savefig(logfile[:-3] + "longest_transcript.pdf", format='pdf')
+            plt.show()
 
-
-
+        
 
